@@ -1,0 +1,3 @@
+Leon Walker is a research scientist at Quantum Dynamics. He contributes to Project Aurora and specialises in distributed training techniques.
+
+His research focuses on reducing the computational cost of training large neural networks.

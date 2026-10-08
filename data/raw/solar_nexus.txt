@@ -1,0 +1,3 @@
+SolarNexus develops SunCast, a machine-learning platform for renewable-energy forecasting.
+
+SunCast uses recurrent neural networks to model historical solar production data. SolarNexus operates independently and has no corporate relationship with Aether Labs.

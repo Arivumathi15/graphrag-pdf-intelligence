@@ -1,0 +1,3 @@
+Transformer neural networks rely on attention mechanisms to model relationships within sequential data.
+
+The architecture has been widely adopted in natural language processing, forecasting, and other machine-learning applications.

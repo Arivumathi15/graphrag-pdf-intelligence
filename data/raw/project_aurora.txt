@@ -1,0 +1,3 @@
+Project Aurora is a joint research initiative between Aether Labs and Quantum Dynamics.
+
+The project investigates energy-efficient training techniques for large transformer models.
