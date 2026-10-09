@@ -1,3 +1,4 @@
+import re
 from html import escape
 
 import streamlit as st
@@ -301,6 +302,69 @@ def render_graph_path(index, path):
     html(f'<div class="path">{"".join(parts)}</div>')
 
 
+GREETING_PATTERN = re.compile(
+    r"^(hi+|hello+|hey+|hiya|yo|howdy|greetings|"
+    r"good\s+(morning|afternoon|evening)|namaste|vanakkam)"
+    r"(\s+(there|team|bot|assistant|everyone))?$"
+)
+
+ABOUT_PATTERN = re.compile(
+    r"^(what('?s|\s+is)\s+(your|ur)\s+(work|job|purpose|role)|"
+    r"what\s+(do|can)\s+(you|u)\s+do|"
+    r"what\s+are\s+(you|u)|who\s+are\s+(you|u)|"
+    r"how\s+(does\s+(this|it)\s+work|can\s+(you|u)\s+help)|"
+    r"(can|could)\s+(you|u)\s+help(\s+me)?|"
+    r"help|help\s+me|about|how\s+are\s+(you|u))$"
+)
+
+THANKS_PATTERN = re.compile(
+    r"^(thanks?|thank\s+you|thx|ok(ay)?|cool|great|nice|bye|goodbye)"
+    r"(\s+(a\s+lot|so\s+much|you))?$"
+)
+
+
+def small_talk_reply(question, stats):
+    """Return a canned reply for greetings and 'what do you do'
+    messages, or None for a real document question.
+
+    Handled locally so these never trigger an LLM or graph call.
+    """
+
+    text = re.sub(r"[^\w\s']", " ", question.lower())
+    text = re.sub(r"\s+", " ", text).strip()
+
+    if GREETING_PATTERN.match(text):
+        opening = "Hi! 👋"
+    elif ABOUT_PATTERN.match(text):
+        opening = ""
+    elif THANKS_PATTERN.match(text):
+        return (
+            "You're welcome! Ask another question about your "
+            "documents whenever you're ready."
+        )
+    else:
+        return None
+
+    return (
+        f"{opening} I'm **GraphRAG PDF Intelligence**. "
+        "I answer questions about your PDF documents by combining "
+        "vector search with a knowledge graph, so I can connect facts "
+        "that are spread across different pages. Every answer comes "
+        "with its source pages.\n\n"
+        f"Your knowledge base is ready: **{stats['documents']}** "
+        f"document(s), **{stats['pages']}** pages and "
+        f"**{stats['entities']}** entities.\n\n"
+        "**Next step:** type a question about your documents in the "
+        "box above and press **Ask**. For example:\n"
+        "- *Summarize the main idea of this document.*\n"
+        "- *How are the retriever and generator connected?*\n"
+        "- *Which methods are compared, and on what metrics?*\n\n"
+        "To use different documents, upload new PDFs in the sidebar "
+        "and click **Process documents** (this replaces the current "
+        "knowledge base)."
+    ).strip()
+
+
 def render_evidence(index, chunk):
     score = float(chunk["score"])
     width = max(0.0, min(score, 1.0)) * 100
@@ -550,6 +614,10 @@ if ask_button:
             icon=":material/warning:",
         )
 
+    elif (chat_reply := small_talk_reply(question, stats)):
+
+        st.session_state["result"] = {"chat": chat_reply}
+
     else:
 
         try:
@@ -575,7 +643,19 @@ if ask_button:
 
 result = st.session_state.get("result")
 
-if result:
+if result and "chat" in result:
+
+    st.write("")
+
+    with st.container(key="answer_card"):
+
+        html(
+            '<div class="answer-head"><span>Assistant</span></div>'
+        )
+
+        st.markdown(result["chat"])
+
+elif result:
 
     st.write("")
 
