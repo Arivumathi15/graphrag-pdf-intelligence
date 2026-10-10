@@ -47,25 +47,29 @@ def save_json(path: Path, data):
         )
 
 
-def load_existing_results():
+def load_existing_results(path: Path = RAW_OUTPUT_PATH):
 
-    if not RAW_OUTPUT_PATH.exists():
+    if not path.exists():
         return []
 
-    with RAW_OUTPUT_PATH.open(
+    with path.open(
         "r",
         encoding="utf-8"
     ) as file:
         return json.load(file)
 
 
-def main():
+def main(
+    chunks_path: Path = CHUNKS_PATH,
+    raw_path: Path = RAW_OUTPUT_PATH,
+    resolved_path: Path = RESOLVED_OUTPUT_PATH,
+):
 
     print("=" * 70)
     print("PDF KNOWLEDGE GRAPH BATCH EXTRACTION")
     print("=" * 70)
 
-    with CHUNKS_PATH.open(
+    with chunks_path.open(
         "r",
         encoding="utf-8"
     ) as file:
@@ -74,7 +78,7 @@ def main():
     print(f"Total chunks: {len(chunks)}")
 
     # Load previous progress if extraction was interrupted.
-    extraction_results = load_existing_results()
+    extraction_results = load_existing_results(raw_path)
 
     completed_chunk_ids = {
         result["chunk_id"]
@@ -160,7 +164,7 @@ def main():
                 # Save after EVERY chunk so a crash
                 # can resume from here.
                 save_json(
-                    RAW_OUTPUT_PATH,
+                    raw_path,
                     extraction_results
                 )
 
@@ -194,7 +198,7 @@ def main():
     )
 
     save_json(
-        RESOLVED_OUTPUT_PATH,
+        resolved_path,
         resolved_graph
     )
 
@@ -219,12 +223,12 @@ def main():
 
     print(
         f"\nRaw extraction:\n"
-        f"{RAW_OUTPUT_PATH}"
+        f"{raw_path}"
     )
 
     print(
         f"\nResolved graph:\n"
-        f"{RESOLVED_OUTPUT_PATH}"
+        f"{resolved_path}"
     )
 
 

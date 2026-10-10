@@ -6,7 +6,9 @@ DATASET_ID = "pdf_app"
 
 class PDFGraphRetriever:
 
-    def __init__(self):
+    def __init__(self, dataset_id: str = DATASET_ID):
+
+        self.dataset_id = dataset_id
 
         self.client = Neo4jClient()
         self.client.verify_connection()
@@ -79,7 +81,7 @@ class PDFGraphRetriever:
 
                 LIMIT $limit
                 """,
-                dataset_id=DATASET_ID,
+                dataset_id=self.dataset_id,
                 search_text=search_text,
                 limit=limit
             )
@@ -142,7 +144,7 @@ class PDFGraphRetriever:
             result = session.run(
                 query,
                 entity_key=entity_key,
-                dataset_id=DATASET_ID,
+                dataset_id=self.dataset_id,
                 limit=limit
             )
 

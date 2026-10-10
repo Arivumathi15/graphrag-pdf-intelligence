@@ -6,6 +6,7 @@ Plain vector RAG retrieves passages that *look similar* to the question, so it s
 
 ## Features
 
+- **Multi-document library** – every PDF is processed into its own workspace. Switch between documents from the sidebar, keep a separate chat history for each, and delete the ones you no longer need.
 - **PDF ingestion** – text extraction (PyMuPDF), cleaning and chunking with per-page provenance.
 - **Vector retrieval** – `sentence-transformers/all-MiniLM-L6-v2` embeddings in a FAISS index.
 - **Parallel knowledge-graph extraction** – LLM entity/relationship extraction across a thread pool, resumable, with retries, token-budget escalation and recovery of truncated JSON.
@@ -13,7 +14,8 @@ Plain vector RAG retrieves passages that *look similar* to the question, so it s
 - **Hybrid GraphRAG** – query analysis, entity linking, multi-hop graph traversal (up to 2 hops by default) and context fusion with vector results.
 - **Explainable answers** – sources with page numbers, matched entities, graph reasoning paths and the raw vector evidence with similarity scores.
 - **Baseline and evaluation harness** – a vector-only RAG baseline and a 30-question benchmark spanning 1 to 5 hops.
-- **Streamlit UI** – a dark, dashboard-style interface for uploading PDFs and asking questions.
+- **Streamlit UI** – a dark, dashboard-style interface for uploading PDFs and chatting with the selected document.
+- **Demo mode** – a read-only mode with bundled sample documents, intended for public deployments.
 
 ## How it works
 
@@ -24,11 +26,11 @@ PDF ─► ingestion ─► chunks                                           ├
                               (parallel)
 ```
 
-1. **Ingest** – PDFs are read page by page, cleaned and split into chunks (`data/processed/pdf_chunks.json`).
+1. **Ingest** – PDFs are read page by page, cleaned and split into chunks (`data/workspaces/<doc_id>/chunks.json`).
 2. **Index** – chunks are embedded and stored in FAISS.
 3. **Extract** – an LLM turns each chunk into entities and relationships. Chunks are processed in parallel and progress is saved after every chunk.
-4. **Resolve and load** – entities are de-duplicated and loaded into Neo4j.
-5. **Answer** – the question is analysed, linked to graph entities, and the graph is traversed for connected evidence. That evidence is combined with the top-K vector hits and passed to the LLM.
+4. **Resolve and load** – entities are de-duplicated and loaded into Neo4j under the document's own `dataset_id`, so each document has a separate graph.
+5. **Answer** – the question is analysed, linked to graph entities, and that document's graph is traversed for connected evidence. That evidence is combined with the top-K vector hits and passed to the LLM.
 
 ## Evaluation
 
@@ -74,6 +76,7 @@ NEO4J_PASSWORD=your_password
 
 # Optional
 EXTRACTION_WORKERS=8
+DEMO_MODE=0
 ```
 
 | Variable | Required | Description |
@@ -83,6 +86,8 @@ EXTRACTION_WORKERS=8
 | `NEO4J_USERNAME` | yes | Neo4j user |
 | `NEO4J_PASSWORD` | yes | Neo4j password |
 | `EXTRACTION_WORKERS` | no | Parallel LLM calls during graph extraction (default `8`). Lower it if you see rate-limit errors, raise it if you have headroom. |
+
+| `DEMO_MODE` | no | Set to `1` to hide uploading and deleting and serve only the documents already in the library. Use it for public deployments. |
 
 `.env` is git-ignored. Never commit credentials.
 
@@ -95,13 +100,16 @@ streamlit run app.py
 ```
 
 1. Upload one or more PDFs in the sidebar and click **Process documents**.
-2. Wait for the four stages to finish (ingestion, vector index, graph extraction, Neo4j load).
-3. Ask a question. The answer card shows the response; the tabs below show sources, graph reasoning paths and vector evidence.
+2. Wait for the four stages to finish (ingestion, vector index, graph extraction, Neo4j load). The document then appears under **Documents** in the sidebar.
+3. Click a document to open it, then ask a question. The answer card shows the response; the tabs below show sources, graph reasoning paths and vector evidence.
+4. Click another document to switch. Each document keeps its own chat history for the rest of the session.
 
 Notes:
 
 - The first start takes roughly 30 seconds while the embedding model and its dependencies load. A loading message is shown meanwhile.
-- Processing a new upload **replaces** the previous documents and knowledge base.
+- Uploading **adds** a document; nothing is replaced. Uploading the same file again is detected by its content hash and skipped, so it costs no extra LLM calls.
+- The bin icon next to a document deletes its files and its Neo4j graph.
+- Chat history is kept in the browser session only. It is cleared when the page is refreshed.
 - Adjust **Vector Top-K** in the sidebar to control how many chunks are retrieved before graph expansion.
 
 ### Run the pipeline stages manually
@@ -115,7 +123,9 @@ python -m src.extraction.batch_pdf_extract     # extract entities and relationsh
 python -m src.graph.pdf_graph_loader           # load the graph into Neo4j
 ```
 
-If extraction is interrupted, re-running `batch_pdf_extract` resumes from the chunks already saved in `data/processed/pdf_raw_extractions.json`. Chunks that failed are retried automatically.
+These standalone commands work on the legacy single-corpus files in `data/processed/`. To process a PDF into its own workspace from code, use `PDFProcessingPipeline().process_pdf(filename, pdf_bytes)`.
+
+If extraction is interrupted, re-running `batch_pdf_extract` resumes from the chunks already saved. Chunks that failed are retried automatically.
 
 ### Run the evaluation
 
@@ -144,10 +154,31 @@ src/
 data/
   raw/                  Sample text corpus for the benchmark
   evaluation/           Questions, gold paths and results
-  pdf_uploads/          Uploaded PDFs
-  processed/            Generated artifacts (git-ignored)
+  workspaces/<doc_id>/  One folder per processed document (PDF, chunks, FAISS index, graph, meta.json)
+  processed/            Legacy single-corpus artifacts (git-ignored)
 tests/                  Unit tests
 ```
+
+## Deployment (Streamlit Community Cloud)
+
+1. Push the repo to GitHub and create an app from `app.py`.
+2. Add the secrets under **Advanced settings**:
+
+   ```toml
+   NVIDIA_API_KEY = "..."
+   NEO4J_URI = "neo4j+s://<instance>.databases.neo4j.io"
+   NEO4J_USERNAME = "neo4j"
+   NEO4J_PASSWORD = "..."
+   DEMO_MODE = "1"
+   ```
+
+3. The app serves the documents committed under `data/workspaces/`. The matching graphs must already exist in the Neo4j instance (they are created when a document is processed locally with the same credentials).
+
+Notes:
+
+- The cloud disk is ephemeral, so anything uploaded in the cloud app would disappear on restart. That is why the public deployment runs in demo mode with bundled documents.
+- All visitors share the same documents and the same Neo4j instance. Keep `DEMO_MODE=1` on public deployments so strangers cannot upload or delete.
+- `.gitignore` excludes `data/workspaces/*` except the bundled demo documents. To bundle another one, add a matching `!data/workspaces/<doc_id>/` and `!data/workspaces/<doc_id>/**` entry.
 
 ## Troubleshooting
 
@@ -155,6 +186,7 @@ tests/                  Unit tests
 |---------|----------------------|
 | Blank dark page for about 30 s on first load | Models are still importing. Wait for the loading message to finish. |
 | `NVIDIA_API_KEY not found in .env` | Create `.env` in the project root as shown above. |
+| A document shows in the list but questions fail | Its graph may be missing from the connected Neo4j instance (for example after switching to a new database). Delete it and process it again. |
 | Neo4j connection error | Check that the instance is running and that `NEO4J_URI`, username and password are correct. |
 | Many `[ERROR]` lines or a stall during extraction | The API is probably rate-limiting. Set `EXTRACTION_WORKERS=4` and re-run; progress is kept. |
 | Fewer entities than expected on a re-run | The LLM is not fully deterministic, so counts vary slightly between runs. |

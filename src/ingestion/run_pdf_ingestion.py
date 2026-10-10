@@ -19,7 +19,10 @@ OUTPUT_PATH = Path(
 )
 
 
-def run_pdf_ingestion():
+def run_pdf_ingestion(
+    pdf_dir=RAW_PDF_DIR,
+    output_path=OUTPUT_PATH,
+):
     """
     Load PDFs, clean extracted text,
     chunk pages and save the processed chunks.
@@ -29,18 +32,18 @@ def run_pdf_ingestion():
     print("PDF INGESTION")
     print("=" * 70)
 
-    RAW_PDF_DIR.mkdir(
+    pdf_dir.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    OUTPUT_PATH.parent.mkdir(
+    output_path.parent.mkdir(
         parents=True,
         exist_ok=True
     )
 
     documents = load_pdf_documents(
-        RAW_PDF_DIR
+        pdf_dir
     )
 
     if not documents:
@@ -48,7 +51,7 @@ def run_pdf_ingestion():
             "\nNo PDF documents found in:"
         )
         print(
-            RAW_PDF_DIR.resolve()
+            pdf_dir.resolve()
         )
         return
 
@@ -80,7 +83,7 @@ def run_pdf_ingestion():
             chunks
         )
 
-    with OUTPUT_PATH.open(
+    with output_path.open(
         "w",
         encoding="utf-8"
     ) as file:
@@ -99,7 +102,7 @@ def run_pdf_ingestion():
 
     print(
         f"Saved to: "
-        f"{OUTPUT_PATH}"
+        f"{output_path}"
     )
 
     print("\nSample chunks:")

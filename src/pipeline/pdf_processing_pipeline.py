@@ -1,5 +1,5 @@
 import json
-import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.ingestion.run_pdf_ingestion import (
@@ -13,137 +13,45 @@ from src.extraction.batch_pdf_extract import (
 )
 from src.graph.pdf_graph_loader import (
     main as load_graph_to_neo4j,
+    delete_dataset,
 )
-
-
-PDF_UPLOAD_DIR = Path(
-    "data/pdf_uploads"
-)
-
-CHUNKS_PATH = Path(
-    "data/processed/pdf_chunks.json"
-)
-
-RAW_EXTRACTIONS_PATH = Path(
-    "data/processed/pdf_raw_extractions.json"
-)
-
-RESOLVED_GRAPH_PATH = Path(
-    "data/processed/pdf_resolved_graph.json"
-)
-
-FAISS_INDEX_PATH = Path(
-    "data/processed/pdf_faiss.index"
-)
-
-FAISS_METADATA_PATH = Path(
-    "data/processed/pdf_faiss_metadata.json"
+from src.pipeline.workspace import (
+    Workspace,
+    get_workspace,
+    list_workspaces,
+    make_doc_id,
 )
 
 
 class PDFProcessingPipeline:
+    """
+    Processes each PDF into its own workspace so several
+    documents can coexist. Nothing is deleted when a new
+    document is added.
+    """
 
-    def __init__(self):
+    def __init__(self, embedding_model=None):
 
-        PDF_UPLOAD_DIR.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        # Optional shared model so the app loads it only once.
+        self.embedding_model = embedding_model
 
     # --------------------------------------------------
-    # Clean previous application data
+    # Listing and statistics
     # --------------------------------------------------
 
-    def clear_previous_data(
-        self,
-        clear_uploaded_pdfs: bool = False,
-    ):
+    def list_documents(self) -> list[dict]:
+        """Metadata for every processed document, newest first."""
 
-        generated_files = [
-            CHUNKS_PATH,
-            RAW_EXTRACTIONS_PATH,
-            RESOLVED_GRAPH_PATH,
-            FAISS_INDEX_PATH,
-            FAISS_METADATA_PATH,
+        return [
+            workspace.read_meta()
+            for workspace in list_workspaces()
         ]
 
-        for path in generated_files:
-
-            if path.exists():
-
-                path.unlink()
-
-                print(
-                    f"Removed: {path}"
-                )
-
-        if clear_uploaded_pdfs:
-
-            for pdf_path in (
-                PDF_UPLOAD_DIR.glob("*.pdf")
-            ):
-
-                pdf_path.unlink()
-
-                print(
-                    f"Removed PDF: "
-                    f"{pdf_path.name}"
-                )
-
-    # --------------------------------------------------
-    # Save uploaded files
-    # --------------------------------------------------
-
-    def save_uploaded_files(
-        self,
-        uploaded_files,
-    ):
-
-        PDF_UPLOAD_DIR.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
-
-        saved_files = []
-
-        for uploaded_file in uploaded_files:
-
-            filename = Path(
-                uploaded_file.name
-            ).name
-
-            if (
-                Path(filename)
-                .suffix
-                .lower()
-                != ".pdf"
-            ):
-                continue
-
-            destination = (
-                PDF_UPLOAD_DIR
-                / filename
-            )
-
-            with destination.open(
-                "wb"
-            ) as file:
-
-                file.write(
-                    uploaded_file.getbuffer()
-                )
-
-            saved_files.append(
-                destination
-            )
-
-        return saved_files
-
-    # --------------------------------------------------
-    # Read processing statistics
-    # --------------------------------------------------
-
-    def get_statistics(self):
+    def get_statistics(self, doc_id: str | None = None) -> dict:
+        """
+        Statistics for one document, or totals across all
+        documents when doc_id is None.
+        """
 
         stats = {
             "documents": 0,
@@ -153,228 +61,220 @@ class PDFProcessingPipeline:
             "relationships": 0,
         }
 
-        # PDFs
+        if doc_id is not None:
 
-        stats["documents"] = len(
-            list(
-                PDF_UPLOAD_DIR.glob(
-                    "*.pdf"
-                )
+            workspace = get_workspace(doc_id)
+
+            documents = (
+                [workspace.read_meta()]
+                if workspace
+                else []
             )
-        )
 
-        # Chunks + pages
+        else:
 
-        if CHUNKS_PATH.exists():
+            documents = self.list_documents()
 
-            with CHUNKS_PATH.open(
+        for meta in documents:
+
+            stats["documents"] += 1
+
+            for key in (
+                "pages",
+                "chunks",
+                "entities",
+                "relationships",
+            ):
+                stats[key] += meta.get(key, 0)
+
+        return stats
+
+    # --------------------------------------------------
+    # Processing
+    # --------------------------------------------------
+
+    def process_pdf(
+        self,
+        filename: str,
+        content: bytes,
+        progress=None,
+    ):
+        """
+        Process one PDF into its own workspace.
+
+        Returns (meta, created). If the same file was already
+        processed, nothing is recomputed and created is False.
+        """
+
+        def report(message):
+            if progress:
+                progress(message)
+
+        filename = Path(filename).name
+
+        if Path(filename).suffix.lower() != ".pdf":
+            raise ValueError(f"{filename} is not a PDF file.")
+
+        doc_id = make_doc_id(filename, content)
+
+        existing = get_workspace(doc_id)
+
+        if existing is not None:
+            return existing.read_meta(), False
+
+        workspace = Workspace(doc_id)
+
+        # A previous attempt may have been interrupted.
+        workspace.remove()
+
+        workspace.pdf_dir.mkdir(parents=True, exist_ok=True)
+
+        (workspace.pdf_dir / filename).write_bytes(content)
+
+        try:
+
+            print("\n" + "=" * 70)
+            print(f"PROCESSING: {filename}  ({doc_id})")
+            print("=" * 70)
+
+            report(f"Reading and chunking {filename}...")
+
+            run_pdf_ingestion(
+                pdf_dir=workspace.pdf_dir,
+                output_path=workspace.chunks_path,
+            )
+
+            if not workspace.chunks_path.exists():
+                raise ValueError(
+                    "No extractable text was found. Scanned "
+                    "(image-only) PDFs are not supported."
+                )
+
+            with workspace.chunks_path.open(
                 "r",
                 encoding="utf-8",
             ) as file:
-
                 chunks = json.load(file)
 
-            stats["chunks"] = len(
-                chunks
-            )
-
-            unique_pages = {
-                (
-                    chunk.get("source"),
-                    chunk.get("page"),
+            if not chunks:
+                raise ValueError(
+                    "No extractable text was found. Scanned "
+                    "(image-only) PDFs are not supported."
                 )
-                for chunk in chunks
-            }
 
-            stats["pages"] = len(
-                unique_pages
+            report("Building vector index...")
+
+            build_pdf_index(
+                chunks_path=workspace.chunks_path,
+                index_path=workspace.index_path,
+                metadata_path=workspace.metadata_path,
+                embedding_model=self.embedding_model,
             )
 
-        # Graph
+            report("Extracting knowledge graph...")
 
-        if RESOLVED_GRAPH_PATH.exists():
+            run_graph_extraction(
+                chunks_path=workspace.chunks_path,
+                raw_path=workspace.raw_path,
+                resolved_path=workspace.graph_path,
+            )
 
-            with RESOLVED_GRAPH_PATH.open(
+            if not workspace.graph_path.exists():
+                raise RuntimeError(
+                    "Graph extraction did not produce "
+                    "a resolved graph."
+                )
+
+            report("Loading graph into Neo4j...")
+
+            load_graph_to_neo4j(
+                graph_path=workspace.graph_path,
+                dataset_id=doc_id,
+            )
+
+            with workspace.graph_path.open(
                 "r",
                 encoding="utf-8",
             ) as file:
-
                 graph = json.load(file)
 
-            stats["entities"] = len(
-                graph.get(
-                    "entities",
-                    [],
-                )
-            )
+            meta = {
+                "doc_id": doc_id,
+                "name": filename,
+                "pages": len(
+                    {chunk["page"] for chunk in chunks}
+                ),
+                "chunks": len(chunks),
+                "entities": len(graph.get("entities", [])),
+                "relationships": len(
+                    graph.get("relationships", [])
+                ),
+                "created_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+            }
 
-            stats["relationships"] = len(
-                graph.get(
-                    "relationships",
-                    [],
-                )
-            )
+            # Written last: its presence marks the document ready.
+            workspace.write_meta(meta)
 
-        return stats
+            return meta, True
 
-    # --------------------------------------------------
-    # Main processing pipeline
-    # --------------------------------------------------
+        except Exception:
 
-    def process_existing_pdfs(self):
+            # Don't leave a half-built document behind.
+            workspace.remove()
 
-        pdf_files = list(
-            PDF_UPLOAD_DIR.glob(
-                "*.pdf"
-            )
-        )
+            try:
+                delete_dataset(doc_id)
+            except Exception:
+                pass
 
-        if not pdf_files:
-
-            raise ValueError(
-                "No PDF files found in "
-                "data/pdf_uploads."
-            )
-
-        print("\n" + "=" * 70)
-        print("PDF GRAPHRAG PROCESSING PIPELINE")
-        print("=" * 70)
-
-        print(
-            f"\nDocuments: "
-            f"{len(pdf_files)}"
-        )
-
-        # Important:
-        # remove generated application artifacts
-        # before processing a new document batch.
-
-        self.clear_previous_data(
-            clear_uploaded_pdfs=False
-        )
-
-        # ----------------------------------------------
-        # Stage 1
-        # PDF -> cleaned chunks
-        # ----------------------------------------------
-
-        print("\n[1/4] PDF INGESTION")
-
-        run_pdf_ingestion()
-
-        if not CHUNKS_PATH.exists():
-
-            raise RuntimeError(
-                "PDF ingestion did not "
-                "produce pdf_chunks.json."
-            )
-
-        # ----------------------------------------------
-        # Stage 2
-        # Chunks -> FAISS
-        # ----------------------------------------------
-
-        print("\n[2/4] VECTOR INDEX")
-
-        build_pdf_index()
-
-        # ----------------------------------------------
-        # Stage 3
-        # Chunks -> KG extraction
-        # ----------------------------------------------
-
-        print(
-            "\n[3/4] KNOWLEDGE GRAPH "
-            "EXTRACTION"
-        )
-
-        run_graph_extraction()
-
-        if not RESOLVED_GRAPH_PATH.exists():
-
-            raise RuntimeError(
-                "Graph extraction did not "
-                "produce a resolved graph."
-            )
-
-        # ----------------------------------------------
-        # Stage 4
-        # Resolved graph -> Neo4j
-        # ----------------------------------------------
-
-        print("\n[4/4] NEO4J GRAPH LOAD")
-
-        load_graph_to_neo4j()
-
-        stats = self.get_statistics()
-
-        print("\n" + "=" * 70)
-        print("PROCESSING COMPLETE")
-        print("=" * 70)
-
-        print(
-            f"Documents: "
-            f"{stats['documents']}"
-        )
-
-        print(
-            f"Pages: "
-            f"{stats['pages']}"
-        )
-
-        print(
-            f"Chunks: "
-            f"{stats['chunks']}"
-        )
-
-        print(
-            f"Entities: "
-            f"{stats['entities']}"
-        )
-
-        print(
-            f"Relationships: "
-            f"{stats['relationships']}"
-        )
-
-        return stats
-
-    # --------------------------------------------------
-    # Streamlit entry point
-    # --------------------------------------------------
+            raise
 
     def process_uploaded_files(
         self,
         uploaded_files,
-    ):
+        progress=None,
+    ) -> list[dict]:
+        """
+        Streamlit entry point. Returns one entry per file:
+        {"meta": ..., "created": bool}.
+        """
 
         if not uploaded_files:
 
             raise ValueError(
-                "Please upload at least "
-                "one PDF."
+                "Please upload at least one PDF."
             )
 
-        # Remove previous uploaded PDFs and
-        # generated application artifacts.
+        results = []
 
-        self.clear_previous_data(
-            clear_uploaded_pdfs=True
-        )
+        for uploaded_file in uploaded_files:
 
-        saved_files = (
-            self.save_uploaded_files(
-                uploaded_files
-            )
-        )
-
-        if not saved_files:
-
-            raise ValueError(
-                "No valid PDF files "
-                "were uploaded."
+            meta, created = self.process_pdf(
+                filename=uploaded_file.name,
+                content=bytes(uploaded_file.getbuffer()),
+                progress=progress,
             )
 
-        return (
-            self.process_existing_pdfs()
-        )
+            results.append(
+                {"meta": meta, "created": created}
+            )
+
+        return results
+
+    # --------------------------------------------------
+    # Deletion
+    # --------------------------------------------------
+
+    def delete_document(self, doc_id: str) -> None:
+        """Remove one document's files and its Neo4j graph."""
+
+        workspace = get_workspace(doc_id)
+
+        if workspace is None:
+            return
+
+        delete_dataset(doc_id)
+
+        workspace.remove()

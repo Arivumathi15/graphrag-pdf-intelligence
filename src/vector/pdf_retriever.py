@@ -13,23 +13,30 @@ METADATA_PATH = Path("data/processed/pdf_faiss_metadata.json")
 
 class PDFRetriever:
 
-    def __init__(self):
-        if not INDEX_PATH.exists():
+    def __init__(
+        self,
+        index_path=INDEX_PATH,
+        metadata_path=METADATA_PATH,
+        embedding_model=None,
+    ):
+        if not index_path.exists():
             raise FileNotFoundError(
                 "PDF FAISS index not found. Run build_pdf_index first."
             )
 
-        if not METADATA_PATH.exists():
+        if not metadata_path.exists():
             raise FileNotFoundError(
                 "PDF FAISS metadata not found."
             )
 
-        self.index = faiss.read_index(str(INDEX_PATH))
+        self.index = faiss.read_index(str(index_path))
 
-        with METADATA_PATH.open("r", encoding="utf-8") as file:
+        with metadata_path.open("r", encoding="utf-8") as file:
             self.metadata = json.load(file)
 
-        self.embedding_model = EmbeddingModel()
+        self.embedding_model = (
+            embedding_model or EmbeddingModel()
+        )
 
     def retrieve(self, query: str, top_k: int = 5) -> list[dict]:
 

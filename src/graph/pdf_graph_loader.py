@@ -12,7 +12,10 @@ GRAPH_PATH = Path(
 DATASET_ID = "pdf_app"
 
 
-def create_entity_key(name: str) -> str:
+def create_entity_key(
+    name: str,
+    dataset_id: str = DATASET_ID
+) -> str:
     """
     Create a stable unique key for each PDF entity.
     """
@@ -20,7 +23,7 @@ def create_entity_key(name: str) -> str:
     normalized = name.strip().lower()
     normalized = re.sub(r"\s+", " ", normalized)
 
-    return f"{DATASET_ID}::{normalized}"
+    return f"{dataset_id}::{normalized}"
 
 
 def sanitize_relationship_type(
@@ -42,7 +45,46 @@ def sanitize_relationship_type(
     return relationship_type
 
 
-def main():
+def delete_dataset(dataset_id: str) -> int:
+    """
+    Remove every entity (and its relationships) that belongs
+    to one document's graph.
+    """
+
+    client = Neo4jClient()
+
+    try:
+
+        client.verify_connection()
+
+        with client.driver.session() as session:
+
+            record = session.run(
+                """
+                MATCH (
+                    e:PdfEntity {
+                        dataset_id: $dataset_id
+                    }
+                )
+
+                DETACH DELETE e
+
+                RETURN count(e) AS deleted
+                """,
+                dataset_id=dataset_id
+            ).single()
+
+        return record["deleted"] if record else 0
+
+    finally:
+
+        client.close()
+
+
+def main(
+    graph_path: Path = GRAPH_PATH,
+    dataset_id: str = DATASET_ID,
+):
 
     print("=" * 70)
     print("PDF GRAPH -> NEO4J")
@@ -52,7 +94,7 @@ def main():
     # Load resolved graph JSON
     # --------------------------------------------------
 
-    with GRAPH_PATH.open(
+    with graph_path.open(
         "r",
         encoding="utf-8"
     ) as file:
@@ -128,7 +170,7 @@ def main():
 
                 RETURN count(e) AS deleted
                 """,
-                dataset_id=DATASET_ID
+                dataset_id=dataset_id
             )
 
             record = result.single()
@@ -166,7 +208,7 @@ def main():
                     continue
 
                 entity_key = (
-                    create_entity_key(name)
+                    create_entity_key(name, dataset_id)
                 )
 
                 provenance = entity.get(
@@ -216,7 +258,7 @@ def main():
                         "type",
                         "Other"
                     ),
-                    dataset_id=DATASET_ID,
+                    dataset_id=dataset_id,
                     aliases=entity.get(
                         "aliases",
                         []
@@ -277,11 +319,11 @@ def main():
                     continue
 
                 source_key = (
-                    create_entity_key(source)
+                    create_entity_key(source, dataset_id)
                 )
 
                 target_key = (
-                    create_entity_key(target)
+                    create_entity_key(target, dataset_id)
                 )
 
                 relation_type = (
@@ -351,7 +393,7 @@ def main():
                     query,
                     source_key=source_key,
                     target_key=target_key,
-                    dataset_id=DATASET_ID,
+                    dataset_id=dataset_id,
                     sources=sources,
                     pages=pages,
                     chunk_ids=chunk_ids
@@ -398,7 +440,7 @@ def main():
 
                 RETURN count(e) AS count
                 """,
-                dataset_id=DATASET_ID
+                dataset_id=dataset_id
             ).single()
 
             neo4j_entity_count = (
@@ -430,7 +472,7 @@ def main():
 
                 RETURN count(r) AS count
                 """,
-                dataset_id=DATASET_ID
+                dataset_id=dataset_id
             ).single()
 
             neo4j_relationship_count = (

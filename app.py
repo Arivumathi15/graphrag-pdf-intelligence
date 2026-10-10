@@ -1,3 +1,4 @@
+import os
 import re
 from html import escape
 
@@ -156,12 +157,12 @@ section[data-testid="stSidebar"] {
 .stButton button[kind="primary"]:hover { filter: brightness(1.08); }
 
 /* ---------- Answer ---------- */
-.st-key-answer_card {
+[class*="st-key-answer_card"] {
     background: linear-gradient(180deg, rgba(124,131,255,.06), transparent 40%), var(--surface);
     border: 1px solid var(--border); border-left: 3px solid var(--accent);
     border-radius: 14px; padding: 1.4rem 1.6rem;
 }
-.st-key-answer_card p, .st-key-answer_card li { line-height: 1.7; font-size: .98rem; }
+[class*="st-key-answer_card"] p, [class*="st-key-answer_card"] li { line-height: 1.7; font-size: .98rem; }
 .answer-head {
     display: flex; align-items: center; justify-content: space-between;
     color: var(--muted); font-size: .78rem; font-weight: 600;
@@ -240,6 +241,32 @@ section[data-testid="stSidebar"] {
 }
 .footer .chip { color: var(--muted); font-size: .75rem; }
 .muted { color: var(--muted); font-size: .88rem; }
+
+/* ---------- Document list ---------- */
+.st-key-doclist button {
+    justify-content: flex-start !important;
+    text-align: left; font-weight: 500 !important; font-size: .85rem !important;
+    padding: .45rem .7rem !important; border-radius: 10px !important;
+    background: var(--surface) !important; border: 1px solid var(--border) !important;
+    box-shadow: none !important;
+}
+.st-key-doclist button:hover { border-color: #34405A !important; }
+.st-key-doclist button[kind="primary"] {
+    background: rgba(124,131,255,.16) !important;
+    border: 1px solid rgba(124,131,255,.55) !important;
+}
+.st-key-doclist button p {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ---------- Chat ---------- */
+.chatting { display: flex; align-items: center; gap: .6rem; margin-bottom: 1rem; }
+.q-bubble {
+    display: inline-block; max-width: 85%; margin-bottom: .75rem;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 14px 14px 14px 4px; padding: .65rem 1rem;
+    font-size: .95rem; font-weight: 500;
+}
 </style>
 """
 
@@ -250,6 +277,23 @@ st.markdown(CSS, unsafe_allow_html=True)
 # Helpers
 # --------------------------------------------------
 
+# Demo mode (set DEMO_MODE=1): sample documents only, no uploading
+# or deleting. Use it for the public deployment.
+DEMO_MODE = os.getenv("DEMO_MODE", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+
+@st.cache_resource
+def get_embedding_model():
+    # One shared embedding model for every document.
+    from src.vector.embeddings import EmbeddingModel
+
+    return EmbeddingModel()
+
+
 @st.cache_resource
 def get_pipeline():
     # Heavy imports (torch, sentence-transformers, Neo4j) are
@@ -258,14 +302,26 @@ def get_pipeline():
         PDFProcessingPipeline,
     )
 
-    return PDFProcessingPipeline()
+    return PDFProcessingPipeline(
+        embedding_model=get_embedding_model()
+    )
 
 
-@st.cache_resource
-def get_graphrag():
+@st.cache_resource(max_entries=6)
+def get_graphrag(doc_id):
+    # One GraphRAG instance (FAISS index + graph scope) per document.
     from src.hybrid.pdf_graphrag import PDFGraphRAG
+    from src.pipeline.workspace import get_workspace
 
-    return PDFGraphRAG()
+    workspace = get_workspace(doc_id)
+
+    if workspace is None:
+        raise ValueError("This document no longer exists.")
+
+    return PDFGraphRAG(
+        workspace=workspace,
+        embedding_model=get_embedding_model(),
+    )
 
 
 def html(markup):
@@ -323,7 +379,7 @@ THANKS_PATTERN = re.compile(
 )
 
 
-def small_talk_reply(question, stats):
+def small_talk_reply(question, doc_name, stats):
     """Return a canned reply for greetings and 'what do you do'
     messages, or None for a real document question.
 
@@ -345,23 +401,28 @@ def small_talk_reply(question, stats):
     else:
         return None
 
+    switch_hint = (
+        "pick another document in the sidebar to switch."
+        if DEMO_MODE
+        else "pick another document in the sidebar to switch, "
+        "or upload a new PDF and click **Process documents** "
+        "to add it to your list."
+    )
+
     return (
         f"{opening} I'm **GraphRAG PDF Intelligence**. "
         "I answer questions about your PDF documents by combining "
         "vector search with a knowledge graph, so I can connect facts "
         "that are spread across different pages. Every answer comes "
         "with its source pages.\n\n"
-        f"Your knowledge base is ready: **{stats['documents']}** "
-        f"document(s), **{stats['pages']}** pages and "
-        f"**{stats['entities']}** entities.\n\n"
-        "**Next step:** type a question about your documents in the "
+        f"You're chatting with **{doc_name}** "
+        f"({stats['pages']} pages, {stats['entities']} entities).\n\n"
+        "**Next step:** type a question about this document in the "
         "box above and press **Ask**. For example:\n"
         "- *Summarize the main idea of this document.*\n"
-        "- *How are the retriever and generator connected?*\n"
+        "- *How are the key components connected?*\n"
         "- *Which methods are compared, and on what metrics?*\n\n"
-        "To use different documents, upload new PDFs in the sidebar "
-        "and click **Process documents** (this replaces the current "
-        "knowledge base)."
+        f"To use a different document, {switch_hint}"
     ).strip()
 
 
@@ -388,282 +449,22 @@ def render_evidence(index, chunk):
     )
 
 
-# --------------------------------------------------
-# Data
-# --------------------------------------------------
+def render_result(result, key):
+    """Render one answer: the card, then sources / graph / evidence."""
 
-with st.spinner(
-    "Loading models and connecting to the knowledge base "
-    "(first start takes ~30s)..."
-):
-    pipeline = get_pipeline()
+    if "chat" in result:
 
-stats = pipeline.get_statistics()
+        with st.container(key=f"answer_card_{key}"):
 
-has_knowledge_base = stats["chunks"] > 0
-
-
-# --------------------------------------------------
-# Sidebar
-# --------------------------------------------------
-
-with st.sidebar:
-
-    html(
-        """
-        <div class="sb-brand">
-            <div class="sb-logo">🧠</div>
-            <div>
-                <div class="sb-title">GraphRAG</div>
-                <div class="sb-sub">PDF Intelligence Console</div>
-            </div>
-        </div>
-        """
-    )
-
-    html('<div class="sb-label">Knowledge sources</div>')
-
-    uploaded_files = st.file_uploader(
-        "Upload PDF files",
-        type=["pdf"],
-        accept_multiple_files=True,
-        label_visibility="collapsed",
-    )
-
-    process_button = st.button(
-        "Process documents",
-        type="primary",
-        icon=":material/bolt:",
-        use_container_width=True,
-    )
-
-    html('<div class="sb-label">Retrieval settings</div>')
-
-    top_k = st.slider(
-        "Vector Top-K",
-        min_value=1,
-        max_value=10,
-        value=5,
-        help="Number of vector chunks retrieved before graph expansion.",
-    )
-
-
-# --------------------------------------------------
-# Hero
-# --------------------------------------------------
-
-status_dot = "on" if has_knowledge_base else "off"
-status_text = (
-    "Knowledge base ready"
-    if has_knowledge_base
-    else "Awaiting documents"
-)
-
-html(
-    f"""
-    <div class="hero">
-        <span class="hero-badge">
-            <span class="dot {status_dot}"></span>{status_text}
-        </span>
-        <h1>GraphRAG PDF Intelligence</h1>
-        <p>Ask multi-hop questions across your documents. Answers combine
-        dense vector retrieval with knowledge-graph reasoning, with every
-        claim traced back to its source page.</p>
-    </div>
-    """
-)
-
-
-# --------------------------------------------------
-# Knowledge base statistics
-# --------------------------------------------------
-
-kpis = [
-    ("Documents", "📄", stats["documents"]),
-    ("Pages", "📑", stats["pages"]),
-    ("Chunks", "🧩", stats["chunks"]),
-    ("Entities", "🔵", stats["entities"]),
-    ("Relationships", "🔗", stats["relationships"]),
-]
-
-html(
-    '<div class="kpi-grid">'
-    + "".join(
-        f'<div class="kpi"><div class="kpi-top">'
-        f'<span class="kpi-label">{label}</span>'
-        f'<span class="kpi-icon">{icon}</span></div>'
-        f'<div class="kpi-value">{value:,}</div></div>'
-        for label, icon, value in kpis
-    )
-    + "</div>"
-)
-
-
-# --------------------------------------------------
-# Process uploaded documents
-# --------------------------------------------------
-
-if process_button:
-
-    if not uploaded_files:
-
-        st.toast(
-            "Please upload at least one PDF.",
-            icon=":material/warning:",
-        )
-
-    else:
-
-        try:
-
-            with st.status(
-                "Processing documents...",
-                expanded=True,
-            ) as status:
-
-                st.write("Reading and chunking PDFs...")
-                st.write("Building vector index...")
-                st.write("Extracting knowledge graph...")
-                st.write("Loading graph into Neo4j...")
-
-                pipeline.process_uploaded_files(
-                    uploaded_files
-                )
-
-                status.update(
-                    label="Documents processed successfully",
-                    state="complete",
-                    expanded=False,
-                )
-
-            # GraphRAG contains FAISS + graph state,
-            # so clear the cached instance after rebuilding.
-            get_graphrag.clear()
-
-            st.session_state.pop("result", None)
-
-            st.rerun()
-
-        except Exception as error:
-
-            st.error(
-                f"Document processing failed: {error}",
-                icon=":material/error:",
+            html(
+                '<div class="answer-head"><span>Assistant</span></div>'
             )
 
+            st.markdown(result["chat"])
 
-# --------------------------------------------------
-# Empty state
-# --------------------------------------------------
+        return
 
-if not has_knowledge_base:
-
-    html(
-        """
-        <div class="empty">
-            <div class="ico">📂</div>
-            <h3>No documents indexed yet</h3>
-            <p>Upload PDFs from the sidebar and click
-            <b>Process documents</b> to build your knowledge base.</p>
-        </div>
-        """
-    )
-
-    st.stop()
-
-
-# --------------------------------------------------
-# Question answering
-# --------------------------------------------------
-
-section_title("Ask your documents")
-
-with st.container(key="query_card"):
-
-    with st.form("ask_form", border=False):
-
-        input_col, button_col = st.columns(
-            [6, 1],
-            vertical_alignment="bottom",
-        )
-
-        with input_col:
-            question = st.text_input(
-                "Question",
-                placeholder=(
-                    "e.g. How does RAGChecker evaluate "
-                    "the retriever and generator?"
-                ),
-                label_visibility="collapsed",
-            )
-
-        with button_col:
-            ask_button = st.form_submit_button(
-                "Ask",
-                icon=":material/arrow_forward:",
-                use_container_width=True,
-            )
-
-
-if ask_button:
-
-    if not question.strip():
-
-        st.toast(
-            "Please enter a question.",
-            icon=":material/warning:",
-        )
-
-    elif (chat_reply := small_talk_reply(question, stats)):
-
-        st.session_state["result"] = {"chat": chat_reply}
-
-    else:
-
-        try:
-
-            with st.spinner(
-                "Searching vector and graph knowledge..."
-            ):
-
-                graphrag = get_graphrag()
-
-                st.session_state["result"] = graphrag.answer(
-                    question=question,
-                    top_k=top_k,
-                )
-
-        except Exception as error:
-
-            st.error(
-                f"GraphRAG failed: {error}",
-                icon=":material/error:",
-            )
-
-
-result = st.session_state.get("result")
-
-if result and "chat" in result:
-
-    st.write("")
-
-    with st.container(key="answer_card"):
-
-        html(
-            '<div class="answer-head"><span>Assistant</span></div>'
-        )
-
-        st.markdown(result["chat"])
-
-elif result:
-
-    st.write("")
-
-    # ------------------------------------------
-    # Answer
-    # ------------------------------------------
-
-    with st.container(key="answer_card"):
+    with st.container(key=f"answer_card_{key}"):
 
         html(
             f'<div class="answer-head"><span>Answer</span>'
@@ -674,10 +475,6 @@ elif result:
         st.markdown(result["answer"])
 
     st.write("")
-
-    # ------------------------------------------
-    # Details tabs
-    # ------------------------------------------
 
     sources_tab, graph_tab, evidence_tab = st.tabs(
         [
@@ -742,6 +539,471 @@ elif result:
             start=1,
         ):
             render_evidence(index, chunk)
+
+
+# --------------------------------------------------
+# Data
+# --------------------------------------------------
+
+with st.spinner(
+    "Loading models and connecting to the knowledge base "
+    "(first start takes ~30s)..."
+):
+    pipeline = get_pipeline()
+
+documents = pipeline.list_documents()
+
+document_ids = [meta["doc_id"] for meta in documents]
+
+# Session state: which document is open, per-document chat
+# history, and a counter used to reset the file uploader.
+st.session_state.setdefault("active_doc", None)
+st.session_state.setdefault("chats", {})
+st.session_state.setdefault("uploader_nonce", 0)
+
+if st.session_state["active_doc"] not in document_ids:
+    st.session_state["active_doc"] = (
+        document_ids[0] if document_ids else None
+    )
+
+active_id = st.session_state["active_doc"]
+
+active_meta = next(
+    (meta for meta in documents if meta["doc_id"] == active_id),
+    None,
+)
+
+stats = (
+    pipeline.get_statistics(active_id)
+    if active_id
+    else {
+        "documents": 0,
+        "pages": 0,
+        "chunks": 0,
+        "entities": 0,
+        "relationships": 0,
+    }
+)
+
+flash = st.session_state.pop("flash", None)
+
+if flash:
+    st.toast(flash, icon=":material/check_circle:")
+
+
+def select_document(doc_id):
+    st.session_state["active_doc"] = doc_id
+
+
+# --------------------------------------------------
+# Sidebar
+# --------------------------------------------------
+
+uploaded_files = []
+process_button = False
+
+with st.sidebar:
+
+    html(
+        """
+        <div class="sb-brand">
+            <div class="sb-logo">🧠</div>
+            <div>
+                <div class="sb-title">GraphRAG</div>
+                <div class="sb-sub">PDF Intelligence Console</div>
+            </div>
+        </div>
+        """
+    )
+
+    if not DEMO_MODE:
+
+        html('<div class="sb-label">Add documents</div>')
+
+        uploaded_files = st.file_uploader(
+            "Upload PDF files",
+            type=["pdf"],
+            accept_multiple_files=True,
+            label_visibility="collapsed",
+            key=f"uploader_{st.session_state['uploader_nonce']}",
+        )
+
+        process_button = st.button(
+            "Process documents",
+            type="primary",
+            icon=":material/bolt:",
+            use_container_width=True,
+        )
+
+    html(
+        f'<div class="sb-label">Documents ({len(documents)})</div>'
+    )
+
+    if not documents:
+
+        html('<p class="muted">Nothing processed yet.</p>')
+
+    with st.container(key="doclist"):
+
+        for meta in documents:
+
+            doc_id = meta["doc_id"]
+
+            is_active = doc_id == active_id
+
+            if DEMO_MODE:
+                select_col, delete_col = st.container(), None
+            else:
+                select_col, delete_col = st.columns(
+                    [6, 1],
+                    vertical_alignment="center",
+                )
+
+            with select_col:
+
+                st.button(
+                    meta["name"],
+                    key=f"select_{doc_id}",
+                    type="primary" if is_active else "secondary",
+                    icon=":material/description:",
+                    use_container_width=True,
+                    on_click=select_document,
+                    args=(doc_id,),
+                    help=(
+                        f"{meta['pages']} pages · "
+                        f"{meta['chunks']} chunks · "
+                        f"{meta['entities']} entities"
+                    ),
+                )
+
+            if delete_col is not None:
+
+                with delete_col.popover(
+                    "",
+                    icon=":material/delete:",
+                    help="Delete this document",
+                ):
+
+                    st.write(
+                        "Delete this document and its graph? "
+                        "This cannot be undone."
+                    )
+
+                    if st.button(
+                        "Delete permanently",
+                        key=f"delete_{doc_id}",
+                        type="primary",
+                    ):
+
+                        pipeline.delete_document(doc_id)
+
+                        get_graphrag.clear()
+
+                        st.session_state["chats"].pop(doc_id, None)
+
+                        st.session_state["flash"] = (
+                            f"Deleted {meta['name']}"
+                        )
+
+                        st.rerun()
+
+    html('<div class="sb-label">Retrieval settings</div>')
+
+    top_k = st.slider(
+        "Vector Top-K",
+        min_value=1,
+        max_value=10,
+        value=5,
+        help="Number of vector chunks retrieved before graph expansion.",
+    )
+
+    if DEMO_MODE:
+
+        st.caption(
+            "Demo mode: sample documents only. "
+            "Uploading is disabled."
+        )
+
+
+# --------------------------------------------------
+# Hero
+# --------------------------------------------------
+
+status_dot = "on" if active_meta else "off"
+status_text = (
+    f"{len(documents)} document"
+    f"{'s' if len(documents) != 1 else ''} ready"
+    if documents
+    else "Awaiting documents"
+)
+
+html(
+    f"""
+    <div class="hero">
+        <span class="hero-badge">
+            <span class="dot {status_dot}"></span>{status_text}
+        </span>
+        <h1>GraphRAG PDF Intelligence</h1>
+        <p>Ask multi-hop questions across your documents. Answers combine
+        dense vector retrieval with knowledge-graph reasoning, with every
+        claim traced back to its source page.</p>
+    </div>
+    """
+)
+
+
+# --------------------------------------------------
+# Process uploaded documents
+# --------------------------------------------------
+
+if process_button:
+
+    if not uploaded_files:
+
+        st.toast(
+            "Please upload at least one PDF.",
+            icon=":material/warning:",
+        )
+
+    else:
+
+        try:
+
+            with st.status(
+                "Processing documents...",
+                expanded=True,
+            ) as status:
+
+                results = pipeline.process_uploaded_files(
+                    uploaded_files,
+                    progress=st.write,
+                )
+
+                status.update(
+                    label="Documents processed successfully",
+                    state="complete",
+                    expanded=False,
+                )
+
+            created = [r for r in results if r["created"]]
+
+            st.session_state["active_doc"] = results[-1]["meta"][
+                "doc_id"
+            ]
+
+            # Reset the uploader so the files are not re-submitted.
+            st.session_state["uploader_nonce"] += 1
+
+            st.session_state["flash"] = (
+                f"Added {len(created)} document(s)"
+                + (
+                    f"; {len(results) - len(created)} already existed"
+                    if len(created) != len(results)
+                    else ""
+                )
+            )
+
+            st.rerun()
+
+        except Exception as error:
+
+            st.error(
+                f"Document processing failed: {error}",
+                icon=":material/error:",
+            )
+
+
+# --------------------------------------------------
+# Empty state
+# --------------------------------------------------
+
+if active_meta is None:
+
+    if DEMO_MODE:
+
+        body = (
+            "No sample documents are available in this demo yet."
+        )
+
+    else:
+
+        body = (
+            "Upload PDFs from the sidebar and click "
+            "<b>Process documents</b> to build your knowledge base."
+        )
+
+    html(
+        f"""
+        <div class="empty">
+            <div class="ico">📂</div>
+            <h3>No documents indexed yet</h3>
+            <p>{body}</p>
+        </div>
+        """
+    )
+
+    st.stop()
+
+
+# --------------------------------------------------
+# Active document + statistics
+# --------------------------------------------------
+
+chat = st.session_state["chats"].setdefault(active_id, [])
+
+html(
+    f'<div class="chatting"><span class="muted">Chatting with</span>'
+    f'<span class="chip">📄 {escape(active_meta["name"])}</span></div>'
+)
+
+def render_kpis(question_count):
+    kpis = [
+        ("Pages", "📑", stats["pages"]),
+        ("Chunks", "🧩", stats["chunks"]),
+        ("Entities", "🔵", stats["entities"]),
+        ("Relationships", "🔗", stats["relationships"]),
+        ("Questions", "💬", question_count),
+    ]
+
+    return (
+        '<div class="kpi-grid">'
+        + "".join(
+            f'<div class="kpi"><div class="kpi-top">'
+            f'<span class="kpi-label">{label}</span>'
+            f'<span class="kpi-icon">{icon}</span></div>'
+            f'<div class="kpi-value">{value:,}</div></div>'
+            for label, icon, value in kpis
+        )
+        + "</div>"
+    )
+
+
+# Filled in again after a question is answered so the
+# Questions counter is never one step behind.
+kpi_slot = st.empty()
+
+kpi_slot.markdown(
+    render_kpis(len(chat)),
+    unsafe_allow_html=True,
+)
+
+
+# --------------------------------------------------
+# Question answering
+# --------------------------------------------------
+
+section_title("Ask this document")
+
+with st.container(key="query_card"):
+
+    with st.form("ask_form", border=False, clear_on_submit=True):
+
+        input_col, button_col = st.columns(
+            [6, 1],
+            vertical_alignment="bottom",
+        )
+
+        with input_col:
+            question = st.text_input(
+                "Question",
+                placeholder="Ask anything about this document...",
+                label_visibility="collapsed",
+            )
+
+        with button_col:
+            ask_button = st.form_submit_button(
+                "Ask",
+                icon=":material/arrow_forward:",
+                use_container_width=True,
+            )
+
+
+if ask_button:
+
+    if not question.strip():
+
+        st.toast(
+            "Please enter a question.",
+            icon=":material/warning:",
+        )
+
+    elif (
+        chat_reply := small_talk_reply(
+            question,
+            active_meta["name"],
+            stats,
+        )
+    ):
+
+        chat.append(
+            {
+                "question": question.strip(),
+                "result": {"chat": chat_reply},
+            }
+        )
+
+    else:
+
+        try:
+
+            with st.spinner(
+                "Searching vector and graph knowledge..."
+            ):
+
+                graphrag = get_graphrag(active_id)
+
+                chat.append(
+                    {
+                        "question": question.strip(),
+                        "result": graphrag.answer(
+                            question=question,
+                            top_k=top_k,
+                        ),
+                    }
+                )
+
+        except Exception as error:
+
+            st.error(
+                f"GraphRAG failed: {error}",
+                icon=":material/error:",
+            )
+
+
+kpi_slot.markdown(
+    render_kpis(len(chat)),
+    unsafe_allow_html=True,
+)
+
+
+# --------------------------------------------------
+# Conversation history (newest first)
+# --------------------------------------------------
+
+for position, turn in enumerate(reversed(chat)):
+
+    number = len(chat) - position
+
+    if position == 0:
+
+        st.write("")
+
+        html(
+            f'<div class="q-bubble">{escape(turn["question"])}</div>'
+        )
+
+        render_result(turn["result"], f"{active_id}_{number}")
+
+    else:
+
+        if position == 1:
+            section_title("Earlier in this chat")
+
+        with st.expander(
+            f"{number}. {turn['question'][:100]}",
+            expanded=False,
+        ):
+            render_result(turn["result"], f"{active_id}_{number}")
 
 
 # --------------------------------------------------

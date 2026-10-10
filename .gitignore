@@ -14,3 +14,9 @@ data/pdf_uploads/
 
 # Streamlit secrets
 .streamlit/secrets.toml
+
+# Per-document workspaces: ignored, except bundled demo documents
+data/workspaces/*
+!data/workspaces/attention-is-all-you-need-004e56a157/
+!data/workspaces/attention-is-all-you-need-004e56a157/**
+data/workspaces/*/raw_extractions.json

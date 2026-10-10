@@ -13,17 +13,43 @@ CHUNKS_PATH = Path(
 
 class PDFGraphRAG:
 
-    def __init__(self):
+    def __init__(
+        self,
+        workspace=None,
+        embedding_model=None,
+    ):
 
-        self.vector_retriever = PDFRetriever()
+        # A workspace scopes every store to one document.
+        # Without one, fall back to the legacy single-corpus paths.
+        if workspace is not None:
 
-        self.graph_retriever = (
-            PDFGraphRetriever()
-        )
+            chunks_path = workspace.chunks_path
+
+            self.vector_retriever = PDFRetriever(
+                index_path=workspace.index_path,
+                metadata_path=workspace.metadata_path,
+                embedding_model=embedding_model,
+            )
+
+            self.graph_retriever = PDFGraphRetriever(
+                dataset_id=workspace.doc_id
+            )
+
+        else:
+
+            chunks_path = CHUNKS_PATH
+
+            self.vector_retriever = PDFRetriever(
+                embedding_model=embedding_model
+            )
+
+            self.graph_retriever = (
+                PDFGraphRetriever()
+            )
 
         self.llm = NvidiaLLM()
 
-        with CHUNKS_PATH.open(
+        with chunks_path.open(
             "r",
             encoding="utf-8"
         ) as file:
